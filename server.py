@@ -11,7 +11,7 @@ from typing import List, Optional
 from supabase import create_client, Client
 
 from agent import find_businesses, research_business, build_real_demo, draft_outreach_pitch
-from tools.outreach import send_email_with_attachments
+from tools.mailbox import send_email_smtp, verify_mailbox_credentials
 
 app = FastAPI(title="Agents for Humans API")
 
@@ -34,28 +34,42 @@ supabase: Optional[Client] = create_client(supabase_url, supabase_key) if supaba
 SCREENSHOTS_BUCKET = "screenshots"
 
 # ---------------------------------------------------------------------------
-# DEMO MODE SAFETY LOCK
+# MAILBOX SENDING
 # ---------------------------------------------------------------------------
-# This app is a public hackathon demo. Anyone can visit it, research a REAL
-# business, and click "Approve & send." Without this override, that would
-# send a real, unsolicited email to a real business the visitor doesn't know
-# and never contacted. To prevent that, every outreach send in this app is
-# hard-redirected to a single verified test inbox, no matter what recipient
-# the client asks for.
-#
-# IMPORTANT: this check happens here, server-side, not in the frontend.
-# The frontend UI is just for transparency - it cannot be trusted as the
-# actual safety boundary, since anyone can call this API directly (curl,
-# Postman, browser devtools) and bypass any frontend-only restriction.
-SES_TEST_RECIPIENT = os.getenv("SES_TEST_RECIPIENT")
+# Outreach emails now send through each user's own Gmail mailbox (SMTP +
+# App Password) instead of a shared SES sender identity, and land in the
+# REAL researched business inbox - there is no test-inbox redirect anymore.
+# Credentials are looked up per user_name from the user_settings table.
+# (This is keyed by plain user_name for now; task 3 replaces user_name
+# here with a proper Supabase Auth user id + RLS.)
+USER_SETTINGS_TABLE = "user_settings"
 
-if not SES_TEST_RECIPIENT:
-    # Fail loudly at startup rather than silently falling back to sending
-    # real emails to whatever the client requests.
-    raise RuntimeError(
-        "SES_TEST_RECIPIENT is not set. Refusing to start: without it, "
-        "outreach emails could be sent to real, uncontacted businesses."
+
+def get_mailbox_credentials(user_name: str) -> tuple[str, str]:
+    """Looks up a user's connected Gmail address + App Password.
+    Raises HTTPException(400) with a clear message if they haven't
+    connected a mailbox yet, or if Supabase isn't configured at all."""
+    if not supabase:
+        raise HTTPException(
+            status_code=500,
+            detail="Supabase isn't configured on the server, so mailbox settings can't be read.",
+        )
+
+    res = (
+        supabase.table(USER_SETTINGS_TABLE)
+        .select("gmail_address, gmail_app_password")
+        .eq("user_name", user_name)
+        .limit(1)
+        .execute()
     )
+    if not res.data:
+        raise HTTPException(
+            status_code=400,
+            detail="No mailbox connected yet. Add your Gmail address and App Password in Settings before sending.",
+        )
+
+    row = res.data[0]
+    return row["gmail_address"], row["gmail_app_password"]
 
 
 def upload_screenshot_to_storage(local_path: Optional[str]) -> Optional[str]:
@@ -96,6 +110,11 @@ class ResearchRequest(BaseModel):
 class RegenerateRequest(BaseModel):
     business_name: str
     research_profile: str
+
+class SaveMailboxSettingsRequest(BaseModel):
+    user_name: str
+    gmail_address: str
+    gmail_app_password: str
 
 class SendOutreachRequest(BaseModel):
     user_name: str
@@ -171,6 +190,47 @@ async def start_agent_pipeline(request: ResearchRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/settings/mailbox")
+async def save_mailbox_settings(request: SaveMailboxSettingsRequest):
+    try:
+        # Fail fast with a clear error if the App Password is wrong,
+        # rather than only finding out on the next real outreach send.
+        verify_mailbox_credentials(request.gmail_address, request.gmail_app_password)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Couldn't sign in with that Gmail address + App Password. Double-check the App Password (not your regular Gmail password) and that 2-Step Verification is on.",
+        )
+
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase isn't configured on the server.")
+
+    supabase.table(USER_SETTINGS_TABLE).upsert({
+        "user_name": request.user_name,
+        "gmail_address": request.gmail_address,
+        "gmail_app_password": request.gmail_app_password,
+    }, on_conflict="user_name").execute()
+
+    return {"status": "success", "message": f"Mailbox {request.gmail_address} connected."}
+
+@app.get("/api/settings/mailbox")
+async def get_mailbox_settings(user_name: str):
+    if not supabase:
+        return {"status": "success", "connected": False}
+
+    res = (
+        supabase.table(USER_SETTINGS_TABLE)
+        .select("gmail_address")
+        .eq("user_name", user_name)
+        .limit(1)
+        .execute()
+    )
+    if not res.data:
+        return {"status": "success", "connected": False}
+
+    # Never return the app password itself once saved.
+    return {"status": "success", "connected": True, "gmail_address": res.data[0]["gmail_address"]}
+
 @app.post("/api/regenerate-outreach")
 async def regenerate_outreach(request: RegenerateRequest):
     try:
@@ -187,20 +247,11 @@ async def regenerate_outreach(request: RegenerateRequest):
 @app.post("/api/send-outreach")
 async def send_outreach(request: SendOutreachRequest):
     try:
-        # -------------------------------------------------------------
-        # DEMO MODE OVERRIDE - see comment near SES_TEST_RECIPIENT above.
-        # Whatever recipient_email the client sent (the real business
-        # email discovered during research) is recorded for reference
-        # only. The actual email always goes to the verified test inbox.
-        # This line is the entire safety mechanism - it is intentionally
-        # unconditional and not driven by any client-supplied value.
-        # -------------------------------------------------------------
-        researched_business_email = request.recipient_email
-        actual_send_target = SES_TEST_RECIPIENT
+        sender_email, app_password = get_mailbox_credentials(request.user_name)
 
         print(
-            f"[DEMO MODE] Researched business contact was '{researched_business_email}'. "
-            f"Actual send is redirected to verified test inbox '{actual_send_target}'."
+            f"Sending outreach for '{request.business_name}' to "
+            f"'{request.recipient_email}' via {sender_email}'s mailbox."
         )
 
         # Send the actual email using the LOCAL files (real attachments need
@@ -213,10 +264,12 @@ async def send_outreach(request: SendOutreachRequest):
         if request.slack_screenshot:
             attachments.append(request.slack_screenshot)
 
-        status = send_email_with_attachments(
-            to_email=actual_send_target,
+        status = send_email_smtp(
+            to_email=request.recipient_email,
             subject=request.subject,
             body=request.body,
+            sender_email=sender_email,
+            app_password=app_password,
             attachment_paths=attachments
         )
 
@@ -235,11 +288,7 @@ async def send_outreach(request: SendOutreachRequest):
                 "niche": request.niche,
                 "location": request.location,
                 "scale": request.scale,
-                # Store the ACTUAL destination the email was sent to (the
-                # verified test inbox), not the researched business email,
-                # so the History tab accurately reflects what really
-                # happened rather than implying a real send occurred.
-                "recipient_email": actual_send_target,
+                "recipient_email": request.recipient_email,
                 "subject": request.subject,
                 "body": request.body,
                 "form_screenshot": form_url,
@@ -251,7 +300,6 @@ async def send_outreach(request: SendOutreachRequest):
         return {
             "status": "success",
             "message": status,
-            "note": f"Demo mode: sent to verified test inbox instead of {researched_business_email}",
         }
     except Exception as e:
         print("ERROR SENDING OUTREACH:")
