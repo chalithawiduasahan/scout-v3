@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+supabase
+python-dotenv
+playwright
+pyairtable
+requests
+boto3
+tavily-python
+strands-agents
+strands-agents-tools
+linkup-sdk
