@@ -136,7 +136,7 @@ export default function Dashboard({ userName }: { userName: string }) {
 
   const [lightbox, setLightbox] = useState<{ url: string; cap: string } | null>(null);
 
-  const API_BASE = "https://scout-backend-gq18.onrender.com";
+  const API_BASE = import.meta.env.VITE_BACKEND_URL || "https://scout-v3.onrender.com";
 
   // Persist Mailbox Settings locally
   const handleGmailAddressChange = (val: string) => {
