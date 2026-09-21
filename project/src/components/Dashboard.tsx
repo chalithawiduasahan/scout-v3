@@ -113,6 +113,9 @@ export default function Dashboard({ userName }: { userName: string }) {
   const [gmailAddress, setGmailAddress] = useState(() => localStorage.getItem('scout_gmail_address') || '');
   const [gmailAppPassword, setGmailAppPassword] = useState(() => localStorage.getItem('scout_gmail_app_password') || '');
   const [showPassword, setShowPassword] = useState(false);
+  const [mailboxSaving, setMailboxSaving] = useState(false);
+  const [mailboxConnected, setMailboxConnected] = useState(false);
+  const [mailboxNote, setMailboxNote] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
   // Request State
   const [status, setStatus] = useState('');
@@ -159,7 +162,50 @@ export default function Dashboard({ userName }: { userName: string }) {
 
   useEffect(() => {
     fetchHistory();
+    checkMailboxStatus();
   }, [userName, activeTab]);
+
+  const checkMailboxStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/mailbox?user_name=${encodeURIComponent(userName)}`);
+      const data = await res.json();
+      setMailboxConnected(!!data.connected);
+    } catch {
+      // Silent — the connect button + send flow will surface any real problem.
+    }
+  };
+
+  const saveMailboxSettings = async () => {
+    if (!gmailAddress || !gmailAppPassword) {
+      setMailboxNote({ msg: 'Enter both your Gmail address and App Password first.', type: 'error' });
+      return;
+    }
+    setMailboxSaving(true);
+    setMailboxNote(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/settings/mailbox`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_name: userName,
+          gmail_address: gmailAddress,
+          gmail_app_password: gmailAppPassword,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMailboxConnected(true);
+        setMailboxNote({ msg: data.message || 'Mailbox connected.', type: 'success' });
+      } else {
+        setMailboxConnected(false);
+        setMailboxNote({ msg: data.detail || 'Could not connect mailbox.', type: 'error' });
+      }
+    } catch (err: any) {
+      setMailboxNote({ msg: err.message, type: 'error' });
+    } finally {
+      setMailboxSaving(false);
+    }
+  };
 
   const fetchHistory = async () => {
     try {
@@ -457,8 +503,8 @@ export default function Dashboard({ userName }: { userName: string }) {
                       <h2 className="text-xs font-semibold uppercase tracking-wider text-scout-400 flex items-center gap-2">
                         <Key className="h-4 w-4" /> Native Mailbox Settings (SMTP)
                       </h2>
-                      <span className="text-[10px] uppercase font-mono bg-scout-400/10 text-scout-300 px-2 py-0.5 rounded">
-                        Task 2 Active
+                      <span className={`text-[10px] uppercase font-mono px-2 py-0.5 rounded ${mailboxConnected ? 'bg-emerald-400/10 text-emerald-300' : 'bg-scout-400/10 text-scout-300'}`}>
+                        {mailboxConnected ? `Connected (${gmailAddress})` : 'Not connected'}
                       </span>
                     </div>
 
@@ -500,6 +546,21 @@ export default function Dashboard({ userName }: { userName: string }) {
                     <p className="text-xs text-ink-500">
                       Generate an App Password via Google Account &gt; Security &gt; 2-Step Verification.
                     </p>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={saveMailboxSettings}
+                        disabled={mailboxSaving}
+                        className="rounded-xl bg-scout-400 px-4 py-2 text-sm font-semibold text-ink-950 hover:bg-scout-300 disabled:opacity-50"
+                      >
+                        {mailboxSaving ? 'Connecting…' : mailboxConnected ? 'Reconnect mailbox' : 'Connect mailbox'}
+                      </button>
+                      {mailboxNote && (
+                        <span className={`text-xs ${mailboxNote.type === 'success' ? 'text-emerald-300' : 'text-red-300'}`}>
+                          {mailboxNote.msg}
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   <div className="glass-strong rounded-2xl p-6">
