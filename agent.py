@@ -9,7 +9,6 @@ from strands.models import BedrockModel
 from linkup import LinkupClient
 from playwright.sync_api import sync_playwright
 from tools.crm import save_lead_now, archive_lead_now, cleanup_stray_new_leads
-from tools.outreach import send_email_with_attachments
 from tools.slack import send_slack_lead_notification
 
 model = BedrockModel(
