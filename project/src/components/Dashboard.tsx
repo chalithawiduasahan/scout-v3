@@ -124,7 +124,7 @@ export default function Dashboard({ userName }: { userName: string }) {
   const [currentIndex, setCurrentIndex] = useState(0);
 
   // Outreach State
-  const [researchedContactEmail, setResearchedContactEmail] = useState('');
+  const [recipientEmail, setRecipientEmail] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [sendLoading, setSendLoading] = useState(false);
@@ -137,7 +137,6 @@ export default function Dashboard({ userName }: { userName: string }) {
   const [lightbox, setLightbox] = useState<{ url: string; cap: string } | null>(null);
 
   const API_BASE = "https://scout-backend-gq18.onrender.com";
-  const DEMO_RECIPIENT_EMAIL = "cwidusahan@gmail.com";
 
   // Persist Mailbox Settings locally
   const handleGmailAddressChange = (val: string) => {
@@ -186,7 +185,7 @@ export default function Dashboard({ userName }: { userName: string }) {
 
   const loadQueueItem = (item: any) => {
     if (!item) return;
-    setResearchedContactEmail(extractEmail(item.research_profile));
+    setRecipientEmail(extractEmail(item.research_profile));
     setSubject(item.draft_subject);
     setBody(finalizeSignature(item.draft_body, userName));
     setSendNote(null);
@@ -266,6 +265,11 @@ export default function Dashboard({ userName }: { userName: string }) {
       return;
     }
 
+    if (!recipientEmail || !/^[\w.+-]+@[\w-]+\.[\w.-]+$/.test(recipientEmail)) {
+      setSendNote({ msg: 'Enter a valid recipient email address before sending.', type: 'error' });
+      return;
+    }
+
     setSendLoading(true);
     setSendNote(null);
     try {
@@ -276,7 +280,7 @@ export default function Dashboard({ userName }: { userName: string }) {
         niche,
         location,
         scale,
-        recipient_email: DEMO_RECIPIENT_EMAIL,
+        recipient_email: recipientEmail,
         subject,
         body,
         business_name: currentItem.business_name,
@@ -505,20 +509,17 @@ export default function Dashboard({ userName }: { userName: string }) {
                         <label className="text-xs font-medium text-ink-400">Send to</label>
                         <div className="relative">
                           <input
-                            value={DEMO_RECIPIENT_EMAIL}
-                            disabled
-                            readOnly
-                            className="w-full cursor-not-allowed rounded-xl border border-scout-400/30 bg-scout-400/5 px-4 py-2.5 pr-9 text-sm text-scout-200 focus:outline-none"
+                            value={recipientEmail}
+                            onChange={(e) => setRecipientEmail(e.target.value)}
+                            placeholder="contact@business.com"
+                            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-white focus:border-scout-400 focus:outline-none"
                           />
                         </div>
                         <p className="text-xs text-ink-500">
-                          Demo mode — locked to a verified test inbox so trying this out never emails a real business.
+                          {recipientEmail
+                            ? 'Auto-filled from research — edit if needed before sending.'
+                            : "No email found during research — enter the business's contact email manually."}
                         </p>
-                        {researchedContactEmail && (
-                          <p className="text-xs text-ink-500">
-                            Contact found during research (for reference only, not used): {researchedContactEmail}
-                          </p>
-                        )}
                       </div>
                       <div className="flex flex-col gap-2">
                         <label className="text-xs font-medium text-ink-400">Subject</label>
