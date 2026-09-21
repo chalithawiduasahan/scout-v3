@@ -9,74 +9,26 @@ import {
   Database,
   FileText,
   Bot,
-  X 
 } from 'lucide-react';
 import { useMousePosition } from '@/hooks/useMousePosition';
 
-export default function Hero({ onStart }: { onStart: (name: string) => void }) {
+export default function Hero() {
   const mouse = useMousePosition();
   const [niche, setNiche] = useState('wedding planners');
   const [location, setLocation] = useState('Colombo');
   const [submitted, setSubmitted] = useState(false);
-  
-  const [showDialog, setShowDialog] = useState(false);
-  const [userName, setUserName] = useState('');
 
-  const handleInitialSubmit = (e: React.FormEvent) => {
+  // Purely decorative on the landing page — no auth prompt here. Signing
+  // up/logging in happens from the navbar; this just previews the feel
+  // of the product.
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    setShowDialog(true);
-  };
-
-  const handleFinalSubmit = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!userName.trim()) return;
-    setShowDialog(false);
-    onStart(userName); 
+    setSubmitted(true);
+    setTimeout(() => setSubmitted(false), 1800);
   };
 
   return (
     <section className="relative min-h-screen overflow-hidden pt-32 pb-20">
-      
-      {showDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div 
-            className="absolute inset-0 bg-ink-950/60 backdrop-blur-sm" 
-            onClick={() => setShowDialog(false)} 
-          />
-          
-          <div className="glass-strong relative z-10 w-full max-w-md rounded-2xl border border-white/10 p-6 shadow-2xl animate-fade-up">
-            <button 
-              onClick={() => setShowDialog(false)}
-              className="absolute right-4 top-4 text-ink-400 hover:text-white"
-            >
-              <X className="h-5 w-5" />
-            </button>
-            
-            <h3 className="mb-2 font-display text-2xl font-bold text-white">Who is scouting?</h3>
-            <p className="mb-6 text-sm text-ink-300">Enter your name before we fire up the agents.</p>
-            
-            <form onSubmit={handleFinalSubmit}>
-              <input
-                type="text"
-                value={userName}
-                onChange={(e) => setUserName(e.target.value)}
-                placeholder="Your name..."
-                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white placeholder:text-ink-500 focus:border-scout-400 focus:outline-none"
-                autoFocus
-              />
-              
-              <button
-                type="submit"
-                disabled={!userName.trim()}
-                className="mt-6 w-full rounded-xl bg-gradient-to-r from-scout-400 to-aqua-500 py-3 font-semibold text-ink-950 transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:hover:scale-100"
-              >
-                Continue
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
       <div className="mx-auto max-w-7xl px-6">
         <div className="grid items-center gap-12 lg:grid-cols-2">
           <div className="relative z-10">
@@ -109,7 +61,7 @@ export default function Hero({ onStart }: { onStart: (name: string) => void }) {
             </p>
 
             <form
-              onSubmit={handleInitialSubmit}
+              onSubmit={handleSubmit}
               className="mt-8 max-w-lg animate-fade-up"
               style={{ animationDelay: '0.3s' }}
             >

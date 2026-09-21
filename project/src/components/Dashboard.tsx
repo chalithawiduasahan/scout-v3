@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, History, Home, Image as ImageIcon, Loader2, Menu, X, ArrowLeft, Globe, MapPin, BarChart3, Clock, Zap, Target, Plus, Minus, Key, Mail, Eye, EyeOff } from 'lucide-react';
+import { ChevronDown, History, Home, Image as ImageIcon, Loader2, Menu, X, ArrowLeft, Globe, MapPin, BarChart3, Clock, Zap, Target, Plus, Minus, Key, Mail, Eye, EyeOff, LogOut } from 'lucide-react';
+import { useAuth } from '@/context/AuthContext';
 
 const SCALE_OPTIONS = [
   { value: 'small', label: 'Small (<10 staff)' },
@@ -99,7 +100,18 @@ function CountSelect({ value, onChange }: { value: string; onChange: (v: string)
   );
 }
 
-export default function Dashboard({ userName }: { userName: string }) {
+export default function Dashboard() {
+  const { session, signOut } = useAuth();
+  // A human-friendly name for display and for signing off outreach emails
+  // ("Best regards, {name}") — never sent to the backend for identity.
+  // Real identity is the verified Supabase Auth user, via the access
+  // token attached to every API call below.
+  const displayName =
+    session?.user.user_metadata?.full_name || session?.user.email?.split('@')[0] || 'there';
+  const authHeaders: Record<string, string> = session?.access_token
+    ? { Authorization: `Bearer ${session.access_token}` }
+    : {};
+
   const [activeTab, setActiveTab] = useState('home');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -163,11 +175,11 @@ export default function Dashboard({ userName }: { userName: string }) {
   useEffect(() => {
     fetchHistory();
     checkMailboxStatus();
-  }, [userName, activeTab]);
+  }, [session?.user.id, activeTab]);
 
   const checkMailboxStatus = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/settings/mailbox?user_name=${encodeURIComponent(userName)}`);
+      const res = await fetch(`${API_BASE}/api/settings/mailbox`, { headers: authHeaders });
       const data = await res.json();
       setMailboxConnected(!!data.connected);
     } catch {
@@ -185,9 +197,8 @@ export default function Dashboard({ userName }: { userName: string }) {
     try {
       const res = await fetch(`${API_BASE}/api/settings/mailbox`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify({
-          user_name: userName,
           gmail_address: gmailAddress,
           gmail_app_password: gmailAppPassword,
         }),
@@ -209,7 +220,7 @@ export default function Dashboard({ userName }: { userName: string }) {
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/history?user_name=${encodeURIComponent(userName)}`);
+      const res = await fetch(`${API_BASE}/api/history`, { headers: authHeaders });
       const data = await res.json();
       if (res.ok) {
         setHistoryItems(data.data || []);
@@ -233,7 +244,7 @@ export default function Dashboard({ userName }: { userName: string }) {
     if (!item) return;
     setRecipientEmail(extractEmail(item.research_profile));
     setSubject(item.draft_subject);
-    setBody(finalizeSignature(item.draft_body, userName));
+    setBody(finalizeSignature(item.draft_body, displayName));
     setSendNote(null);
   };
 
@@ -264,8 +275,8 @@ export default function Dashboard({ userName }: { userName: string }) {
     try {
       const res = await fetch(`${API_BASE}/api/start-agent`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_name: userName, niche, location, scale, count: numRuns }),
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
+        body: JSON.stringify({ niche, location, scale, count: numRuns }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'Something went wrong running the scout.');
@@ -295,7 +306,7 @@ export default function Dashboard({ userName }: { userName: string }) {
       const data = await res.json();
       if (res.ok) {
         setSubject(data.draft_subject);
-        setBody(finalizeSignature(data.draft_body, userName));
+        setBody(finalizeSignature(data.draft_body, displayName));
       }
     } catch (err) {
       console.error(err);
@@ -320,7 +331,6 @@ export default function Dashboard({ userName }: { userName: string }) {
     setSendNote(null);
     try {
       const payload = {
-        user_name: userName,
         gmail_address: gmailAddress,
         gmail_app_password: gmailAppPassword,
         niche,
@@ -337,7 +347,7 @@ export default function Dashboard({ userName }: { userName: string }) {
       };
       const res = await fetch(`${API_BASE}/api/send-outreach`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders },
         body: JSON.stringify(payload),
       });
       const data = await res.json();
@@ -405,8 +415,23 @@ export default function Dashboard({ userName }: { userName: string }) {
           </button>
         </nav>
 
-        <div className="mt-auto border-t border-white/5 p-6 text-sm text-ink-400">
-          {sidebarOpen ? `Hi, ${userName}` : userName.charAt(0)}
+        <div className="mt-auto border-t border-white/5 p-6">
+          {sidebarOpen ? (
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-sm text-ink-400">Hi, {displayName}</span>
+              <button
+                onClick={() => signOut()}
+                title="Log out"
+                className="shrink-0 rounded-lg p-1.5 text-ink-500 hover:bg-white/5 hover:text-white"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => signOut()} title="Log out" className="text-sm text-ink-400 hover:text-white">
+              {displayName.charAt(0).toUpperCase()}
+            </button>
+          )}
         </div>
       </aside>
 

@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import AnimatedBackground from '@/components/AnimatedBackground';
 import Navbar from '@/components/Navbar';
 import Hero from '@/components/Hero';
@@ -9,25 +8,33 @@ import DashboardMockup from '@/components/DashboardMockup';
 import RadarScout from '@/components/RadarScout';
 import CTA from '@/components/CTA';
 import FAQ, { Footer } from '@/components/FAQ';
-import Dashboard from '@/components/Dashboard'; // Import your agent dashboard
+import Dashboard from '@/components/Dashboard';
+import { useAuth } from '@/context/AuthContext';
 
 function App() {
-  // Tracks the user's name. If empty, show the landing page.
-  const [activeUser, setActiveUser] = useState('');
+  const { session, loading } = useAuth();
 
-  // If a name has been entered, swap the screen entirely to the Dashboard
-  if (activeUser) {
-    return <Dashboard userName={activeUser} />;
+  // Avoid a flash of the landing page while we check for an existing session.
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-ink-950">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-scout-400 border-t-transparent" />
+      </div>
+    );
   }
 
-  // Otherwise, render the original Bolt landing page
+  // Signed in — swap the screen entirely to the Dashboard.
+  if (session) {
+    return <Dashboard />;
+  }
+
+  // Otherwise, render the landing page.
   return (
     <div className="relative min-h-screen overflow-x-hidden">
       <AnimatedBackground />
-      <Navbar onStart={(name) => setActiveUser(name)} />
+      <Navbar />
       <main>
-        {/* Pass the name handler into Hero so the Continue button catches it */}
-        <Hero onStart={(name) => setActiveUser(name)} />
+        <Hero />
         <HowItWorks />
         <ShowDontTell />
         <Features />

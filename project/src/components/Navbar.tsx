@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Menu, X } from 'lucide-react';
+import { Menu, X, LogOut } from 'lucide-react';
 import { useScrollProgress } from '@/hooks/useScrollProgress';
+import { useAuth } from '@/context/AuthContext';
+import AuthModal from '@/components/AuthModal';
 
 const links = [
   { label: 'How it works', href: '#how-it-works' },
@@ -9,12 +11,12 @@ const links = [
   { label: 'FAQ', href: '#faq' },
 ];
 
-export default function Navbar({ onStart }: { onStart: (name: string) => void }) {
+export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [open, setOpen] = useState(false);
-  const [showDialog, setShowDialog] = useState(false);
-  const [userName, setUserName] = useState('');
+  const [authMode, setAuthMode] = useState<'signup' | 'login' | null>(null);
   const progress = useScrollProgress();
+  const { session, signOut } = useAuth();
 
   useEffect(() => {
     const handler = () => setScrolled(window.scrollY > 20);
@@ -22,60 +24,9 @@ export default function Navbar({ onStart }: { onStart: (name: string) => void })
     return () => window.removeEventListener('scroll', handler);
   }, []);
 
-  const handleStartScoutingClick = (e: React.MouseEvent) => {
-    e.preventDefault();
-    setOpen(false);
-    setShowDialog(true);
-  };
-
-  const handleFinalSubmit = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!userName.trim()) return;
-    setShowDialog(false);
-    onStart(userName);
-  };
-
   return (
     <>
-      {showDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
-          <div 
-            className="absolute inset-0 bg-ink-950/60 backdrop-blur-sm" 
-            onClick={() => setShowDialog(false)} 
-          />
-          
-          <div className="glass-strong relative z-10 w-full max-w-md rounded-2xl border border-white/10 p-6 shadow-2xl animate-fade-up">
-            <button 
-              onClick={() => setShowDialog(false)}
-              className="absolute right-4 top-4 text-ink-400 hover:text-white"
-            >
-              <X className="h-5 w-5" />
-            </button>
-            
-            <h3 className="mb-2 font-display text-2xl font-bold text-white">Who is scouting?</h3>
-            <p className="mb-6 text-sm text-ink-300">Enter your name before we fire up the agents.</p>
-            
-            <form onSubmit={handleFinalSubmit}>
-              <input
-                type="text"
-                value={userName}
-                onChange={(e) => setUserName(e.target.value)}
-                placeholder="Your name..."
-                className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white placeholder:text-ink-500 focus:border-scout-400 focus:outline-none"
-                autoFocus
-              />
-              
-              <button
-                type="submit"
-                disabled={!userName.trim()}
-                className="mt-6 w-full rounded-xl bg-gradient-to-r from-scout-400 to-aqua-500 py-3 font-semibold text-ink-950 transition-transform hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:hover:scale-100"
-              >
-                Continue
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
+      {authMode && <AuthModal initialMode={authMode} onClose={() => setAuthMode(null)} />}
 
       <nav
         className={`fixed top-0 left-0 right-0 z-40 transition-all duration-500 ${
@@ -101,13 +52,36 @@ export default function Navbar({ onStart }: { onStart: (name: string) => void })
             ))}
           </div>
 
-          <div className="hidden md:block">
-            <button
-              onClick={handleStartScoutingClick}
-              className="group relative inline-flex items-center gap-2 overflow-hidden rounded-full bg-gradient-to-r from-scout-400 to-aqua-500 px-5 py-2.5 text-sm font-semibold text-ink-950 transition-transform hover:scale-105"
-            >
-              <span className="relative z-10">Start scouting</span>
-            </button>
+          <div className="hidden items-center gap-3 md:flex">
+            {session ? (
+              <>
+                <span className="max-w-[180px] truncate text-sm text-ink-300">
+                  {session.user.user_metadata?.full_name || session.user.email}
+                </span>
+                <button
+                  onClick={() => signOut()}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-white/10 px-4 py-2.5 text-sm font-medium text-ink-200 transition-colors hover:text-white"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  Log out
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setAuthMode('login')}
+                  className="rounded-full px-4 py-2.5 text-sm font-semibold text-ink-200 transition-colors hover:text-white"
+                >
+                  Log in
+                </button>
+                <button
+                  onClick={() => setAuthMode('signup')}
+                  className="group relative inline-flex items-center gap-2 overflow-hidden rounded-full bg-gradient-to-r from-scout-400 to-aqua-500 px-5 py-2.5 text-sm font-semibold text-ink-950 transition-transform hover:scale-105"
+                >
+                  <span className="relative z-10">Sign up</span>
+                </button>
+              </>
+            )}
           </div>
 
           <button
@@ -144,12 +118,44 @@ export default function Navbar({ onStart }: { onStart: (name: string) => void })
                   {l.label}
                 </a>
               ))}
-              <button
-                onClick={handleStartScoutingClick}
-                className="mt-4 rounded-full bg-gradient-to-r from-scout-400 to-aqua-500 px-5 py-3 text-center text-sm font-semibold text-ink-950"
-              >
-                Start scouting
-              </button>
+
+              {session ? (
+                <>
+                  <span className="mt-2 truncate text-sm text-ink-400">
+                    {session.user.user_metadata?.full_name || session.user.email}
+                  </span>
+                  <button
+                    onClick={() => {
+                      setOpen(false);
+                      signOut();
+                    }}
+                    className="rounded-full border border-white/10 px-5 py-3 text-center text-sm font-semibold text-ink-200"
+                  >
+                    Log out
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    onClick={() => {
+                      setOpen(false);
+                      setAuthMode('login');
+                    }}
+                    className="mt-4 rounded-full border border-white/10 px-5 py-3 text-center text-sm font-semibold text-ink-200"
+                  >
+                    Log in
+                  </button>
+                  <button
+                    onClick={() => {
+                      setOpen(false);
+                      setAuthMode('signup');
+                    }}
+                    className="rounded-full bg-gradient-to-r from-scout-400 to-aqua-500 px-5 py-3 text-center text-sm font-semibold text-ink-950"
+                  >
+                    Sign up
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

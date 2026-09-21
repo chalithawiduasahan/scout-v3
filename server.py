@@ -2,7 +2,7 @@ import os
 import random
 import uuid
 import traceback
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,18 +34,48 @@ supabase: Optional[Client] = create_client(supabase_url, supabase_key) if supaba
 SCREENSHOTS_BUCKET = "screenshots"
 
 # ---------------------------------------------------------------------------
+# AUTH (Task 3)
+# ---------------------------------------------------------------------------
+# Identity used to be a free-text "user_name" string the client could set
+# to literally anything. Every endpoint below now instead requires a real
+# Supabase Auth access token (sent as "Authorization: Bearer <token>" by
+# the frontend), which is verified against Supabase's own Auth service on
+# every request. The verified user's id (a uuid, matching auth.uid() used
+# in the RLS policies) is what gets stored in the "user_name" column of
+# outreach_history / user_settings - so a user can never read or write
+# another user's data no matter what the client sends.
+def get_verified_user_id(authorization: Optional[str] = Header(None)) -> str:
+    """FastAPI dependency: verifies the bearer token and returns the
+    authenticated user's id, or raises HTTPException(401)."""
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase isn't configured on the server.")
+
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not signed in. Please log in and try again.")
+
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        user_res = supabase.auth.get_user(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Your session has expired. Please log in again.")
+
+    if not user_res or not user_res.user:
+        raise HTTPException(status_code=401, detail="Your session has expired. Please log in again.")
+
+    return user_res.user.id
+
+
+# ---------------------------------------------------------------------------
 # MAILBOX SENDING
 # ---------------------------------------------------------------------------
-# Outreach emails now send through each user's own Gmail mailbox (SMTP +
+# Outreach emails send through each user's own Gmail mailbox (SMTP +
 # App Password) instead of a shared SES sender identity, and land in the
 # REAL researched business inbox - there is no test-inbox redirect anymore.
-# Credentials are looked up per user_name from the user_settings table.
-# (This is keyed by plain user_name for now; task 3 replaces user_name
-# here with a proper Supabase Auth user id + RLS.)
+# Credentials are looked up per verified user_id from the user_settings table.
 USER_SETTINGS_TABLE = "user_settings"
 
 
-def get_mailbox_credentials(user_name: str) -> tuple[str, str]:
+def get_mailbox_credentials(user_id: str) -> tuple[str, str]:
     """Looks up a user's connected Gmail address + App Password.
     Raises HTTPException(400) with a clear message if they haven't
     connected a mailbox yet, or if Supabase isn't configured at all."""
@@ -58,7 +88,7 @@ def get_mailbox_credentials(user_name: str) -> tuple[str, str]:
     res = (
         supabase.table(USER_SETTINGS_TABLE)
         .select("gmail_address, gmail_app_password")
-        .eq("user_name", user_name)
+        .eq("user_name", user_id)
         .limit(1)
         .execute()
     )
@@ -101,7 +131,6 @@ def upload_screenshot_to_storage(local_path: Optional[str]) -> Optional[str]:
         return local_path
 
 class ResearchRequest(BaseModel):
-    user_name: str
     niche: str
     location: str
     scale: str = "small"
@@ -112,12 +141,10 @@ class RegenerateRequest(BaseModel):
     research_profile: str
 
 class SaveMailboxSettingsRequest(BaseModel):
-    user_name: str
     gmail_address: str
     gmail_app_password: str
 
 class SendOutreachRequest(BaseModel):
-    user_name: str
     niche: str
     location: str
     scale: str
@@ -135,16 +162,16 @@ async def root():
     return {"message": "Scout API is running!"}
 
 @app.post("/api/start-agent")
-async def start_agent_pipeline(request: ResearchRequest):
+async def start_agent_pipeline(request: ResearchRequest, user_id: str = Depends(get_verified_user_id)):
     try:
-        print(f"\n--- API Request Received: User='{request.user_name}', Niche='{request.niche}', Location='{request.location}', Scale='{request.scale}', Count={request.count} ---")
+        print(f"\n--- API Request Received: User='{user_id}', Niche='{request.niche}', Location='{request.location}', Scale='{request.scale}', Count={request.count} ---")
 
         excluded_businesses = []
         if supabase:
-            history_res = supabase.table("outreach_history").select("business_name").eq("user_name", request.user_name).execute()
+            history_res = supabase.table("outreach_history").select("business_name").eq("user_name", user_id).execute()
             if history_res.data:
                 excluded_businesses = [item["business_name"] for item in history_res.data]
-                print(f"Excluding previously contacted businesses for {request.user_name}: {excluded_businesses}")
+                print(f"Excluding previously contacted businesses for {user_id}: {excluded_businesses}")
 
         print("Finding targeted businesses...")
         businesses = await find_businesses(request.niche, request.location, request.scale, excluded_businesses)
@@ -191,7 +218,7 @@ async def start_agent_pipeline(request: ResearchRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/settings/mailbox")
-async def save_mailbox_settings(request: SaveMailboxSettingsRequest):
+async def save_mailbox_settings(request: SaveMailboxSettingsRequest, user_id: str = Depends(get_verified_user_id)):
     try:
         # Fail fast with a clear error if the App Password is wrong,
         # rather than only finding out on the next real outreach send.
@@ -206,7 +233,7 @@ async def save_mailbox_settings(request: SaveMailboxSettingsRequest):
         raise HTTPException(status_code=500, detail="Supabase isn't configured on the server.")
 
     supabase.table(USER_SETTINGS_TABLE).upsert({
-        "user_name": request.user_name,
+        "user_name": user_id,
         "gmail_address": request.gmail_address,
         "gmail_app_password": request.gmail_app_password,
     }, on_conflict="user_name").execute()
@@ -214,14 +241,14 @@ async def save_mailbox_settings(request: SaveMailboxSettingsRequest):
     return {"status": "success", "message": f"Mailbox {request.gmail_address} connected."}
 
 @app.get("/api/settings/mailbox")
-async def get_mailbox_settings(user_name: str):
+async def get_mailbox_settings(user_id: str = Depends(get_verified_user_id)):
     if not supabase:
         return {"status": "success", "connected": False}
 
     res = (
         supabase.table(USER_SETTINGS_TABLE)
         .select("gmail_address")
-        .eq("user_name", user_name)
+        .eq("user_name", user_id)
         .limit(1)
         .execute()
     )
@@ -245,9 +272,9 @@ async def regenerate_outreach(request: RegenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/send-outreach")
-async def send_outreach(request: SendOutreachRequest):
+async def send_outreach(request: SendOutreachRequest, user_id: str = Depends(get_verified_user_id)):
     try:
-        sender_email, app_password = get_mailbox_credentials(request.user_name)
+        sender_email, app_password = get_mailbox_credentials(user_id)
 
         print(
             f"Sending outreach for '{request.business_name}' to "
@@ -283,7 +310,7 @@ async def send_outreach(request: SendOutreachRequest):
             slack_url = upload_screenshot_to_storage(request.slack_screenshot) if request.slack_screenshot else None
 
             supabase.table("outreach_history").insert({
-                "user_name": request.user_name,
+                "user_name": user_id,
                 "business_name": request.business_name,
                 "niche": request.niche,
                 "location": request.location,
@@ -307,14 +334,17 @@ async def send_outreach(request: SendOutreachRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/history")
-async def get_history(user_name: Optional[str] = None):
+async def get_history(user_id: str = Depends(get_verified_user_id)):
     try:
         if not supabase:
             return {"status": "success", "data": []}
 
-        query = supabase.table("outreach_history").select("*").order("created_at", desc=True)
-        if user_name:
-            query = query.eq("user_name", user_name)
+        query = (
+            supabase.table("outreach_history")
+            .select("*")
+            .eq("user_name", user_id)
+            .order("created_at", desc=True)
+        )
 
         response = query.execute()
         return {"status": "success", "data": response.data}
