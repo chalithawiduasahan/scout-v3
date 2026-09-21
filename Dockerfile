@@ -11,12 +11,19 @@ FROM mcr.microsoft.com/playwright/python:v1.42.0-jammy
 
 WORKDIR /app
 
+# Pin the browsers path explicitly so the build step and the running
+# container both agree on where Chromium lives — this is what was
+# missing before, causing "Executable doesn't exist" at runtime even
+# though the build step appeared to succeed.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 # Copy and install Python backend dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Ensure Playwright browser binaries are active
-RUN playwright install chromium
+# Ensure Playwright browser binaries are active (--with-deps also makes
+# sure the OS-level libraries Chromium needs are present)
+RUN playwright install --with-deps chromium
 
 # Copy the rest of the root backend code files
 COPY . .
