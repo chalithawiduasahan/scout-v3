@@ -1,29 +1,43 @@
+import html
 import os
 import random
-import uuid
+import re
 import traceback
+import uuid
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import (
-    FastAPI,
-    HTTPException,
-    Header,
     Depends,
+    FastAPI,
+    Header,
+    HTTPException,
 )
-
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import List, Optional
-
-from supabase import create_client, Client
+from supabase import Client, create_client
+from strands import Agent
 
 from agent import (
+    draft_outreach_pitch,
     find_businesses,
+    model,
     research_business,
     build_real_demo,
-    draft_outreach_pitch,
+)
+
+from tools.dogfood import (
+    DOGFOOD_CAMPAIGN_NICHE,
+    DOGFOOD_CTA,
+    DOGFOOD_FIXED_PITCH,
+    DOGFOOD_SYSTEM_PROMPT,
+    DOGFOOD_ASSET_DIR,
+    dogfood_asset_paths,
+    dogfood_demo_result,
+    dogfood_inline_specs,
+    dogfood_public_paths,
+    missing_dogfood_assets,
 )
 
 from tools.mailbox import (
@@ -33,7 +47,6 @@ from tools.mailbox import (
 
 
 app = FastAPI(title="Agents for Humans API")
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,22 +58,28 @@ app.add_middleware(
 
 
 os.makedirs("screenshots", exist_ok=True)
+os.makedirs(DOGFOOD_ASSET_DIR, exist_ok=True)
 
 app.mount(
     "/screenshots",
     StaticFiles(directory="screenshots"),
-    name="screenshots"
+    name="screenshots",
+)
+
+app.mount(
+    "/campaign-assets",
+    StaticFiles(directory="campaign_assets"),
+    name="campaign-assets",
 )
 
 
-# Initialize Supabase Client securely on the backend
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY")
 
 supabase: Optional[Client] = (
     create_client(
         supabase_url,
-        supabase_key
+        supabase_key,
     )
     if supabase_url and supabase_key
     else None
@@ -68,21 +87,40 @@ supabase: Optional[Client] = (
 
 
 SCREENSHOTS_BUCKET = "screenshots"
+USER_SETTINGS_TABLE = "user_settings"
+
+CAMPAIGN_NORMAL = "normal"
+CAMPAIGN_DOGFOOD = "dogfood"
+
+FOUNDER_USER_ID = os.getenv(
+    "SCOUT_FOUNDER_USER_ID",
+    ""
+).strip()
+
+SCOUT_DEMO_VIDEO_URL = os.getenv(
+    "SCOUT_DEMO_VIDEO_URL",
+    ""
+).strip()
+
+
+dogfood_agent = Agent(
+    model=model,
+    tools=[],
+    system_prompt=DOGFOOD_SYSTEM_PROMPT,
+    callback_handler=None,
+)
 
 
 # ---------------------------------------------------------------------------
 # AUTH
 # ---------------------------------------------------------------------------
 def get_verified_user_id(
-    authorization: Optional[str] = Header(None)
+    authorization: Optional[str] = Header(None),
 ) -> str:
-    """FastAPI dependency: verifies the bearer token and returns the
-    authenticated user's id, or raises HTTPException(401)."""
-
     if not supabase:
         raise HTTPException(
             status_code=500,
-            detail="Supabase isn't configured on the server."
+            detail="Supabase isn't configured on the server.",
         )
 
     if (
@@ -91,7 +129,7 @@ def get_verified_user_id(
     ):
         raise HTTPException(
             status_code=401,
-            detail="Not signed in. Please log in and try again."
+            detail="Not signed in. Please log in and try again.",
         )
 
     token = authorization.split(" ", 1)[1].strip()
@@ -101,29 +139,41 @@ def get_verified_user_id(
     except Exception:
         raise HTTPException(
             status_code=401,
-            detail="Your session has expired. Please log in again."
+            detail="Your session has expired. Please log in again.",
         )
 
     if not user_res or not user_res.user:
         raise HTTPException(
             status_code=401,
-            detail="Your session has expired. Please log in again."
+            detail="Your session has expired. Please log in again.",
         )
 
     return user_res.user.id
 
 
-# ---------------------------------------------------------------------------
-# MAILBOX SENDING
-# ---------------------------------------------------------------------------
-USER_SETTINGS_TABLE = "user_settings"
+def require_founder(user_id: str) -> None:
+    if not FOUNDER_USER_ID:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Founder campaign access is not configured yet. "
+                "Set SCOUT_FOUNDER_USER_ID on the backend."
+            ),
+        )
+
+    if user_id != FOUNDER_USER_ID:
+        raise HTTPException(
+            status_code=403,
+            detail="This campaign is restricted to the Scout founder.",
+        )
 
 
+# ---------------------------------------------------------------------------
+# MAILBOX
+# ---------------------------------------------------------------------------
 def get_mailbox_credentials(
-    user_id: str
+    user_id: str,
 ) -> tuple[str, str]:
-    """Looks up a user's connected Gmail address + App Password."""
-
     if not supabase:
         raise HTTPException(
             status_code=500,
@@ -136,9 +186,7 @@ def get_mailbox_credentials(
     res = (
         supabase
         .table(USER_SETTINGS_TABLE)
-        .select(
-            "gmail_address, gmail_app_password"
-        )
+        .select("gmail_address, gmail_app_password")
         .eq("user_name", user_id)
         .limit(1)
         .execute()
@@ -162,10 +210,8 @@ def get_mailbox_credentials(
 
 
 def upload_screenshot_to_storage(
-    local_path: Optional[str]
+    local_path: Optional[str],
 ) -> Optional[str]:
-    """Uploads a local screenshot file to Supabase Storage."""
-
     if (
         not supabase
         or not local_path
@@ -179,27 +225,34 @@ def upload_screenshot_to_storage(
             or ".png"
         )
 
-        storage_path = (
-            f"{uuid.uuid4().hex}{file_ext}"
-        )
+        storage_path = f"{uuid.uuid4().hex}{file_ext}"
 
-        with open(local_path, "rb") as f:
+        content_type = "image/png"
+
+        lowered = file_ext.lower()
+
+        if lowered in [".jpg", ".jpeg"]:
+            content_type = "image/jpeg"
+        elif lowered == ".gif":
+            content_type = "image/gif"
+        elif lowered == ".webp":
+            content_type = "image/webp"
+
+        with open(local_path, "rb") as file:
             supabase.storage.from_(SCREENSHOTS_BUCKET).upload(
                 path=storage_path,
-                file=f,
+                file=file,
                 file_options={
-                    "content-type": "image/png"
-                }
+                    "content-type": content_type,
+                },
             )
 
-        public_url = (
+        return (
             supabase
             .storage
             .from_(SCREENSHOTS_BUCKET)
             .get_public_url(storage_path)
         )
-
-        return public_url
 
     except Exception:
         print(
@@ -207,8 +260,143 @@ def upload_screenshot_to_storage(
             "to Supabase Storage:"
         )
         traceback.print_exc()
-
         return local_path
+
+
+# ---------------------------------------------------------------------------
+# EMAIL COPY HELPERS
+# ---------------------------------------------------------------------------
+def normalise_normal_inline_copy(
+    body: str,
+) -> str:
+    replacements = [
+        (
+            r"(?i)\bi attached 4 quick screenshots\b",
+            "I included 4 quick screenshots below",
+        ),
+        (
+            r"(?i)\bi attached the 4 screenshots\b",
+            "I included the 4 screenshots below",
+        ),
+        (
+            r"(?i)\b4 attached screenshots\b",
+            "4 screenshots below",
+        ),
+        (
+            r"(?i)\bthe attached screenshots\b",
+            "the screenshots below",
+        ),
+        (
+            r"(?i)\battached screenshots\b",
+            "screenshots below",
+        ),
+        (
+            r"(?i)\battached screenshots showing\b",
+            "screenshots below showing",
+        ),
+        (
+            r"(?i)\bthe four attached screenshots\b",
+            "the four screenshots below",
+        ),
+    ]
+
+    result = body
+
+    for pattern, replacement in replacements:
+        result = re.sub(
+            pattern,
+            replacement,
+            result,
+        )
+
+    return result
+
+
+def _safe_subject(
+    subject: str,
+    business_name: str,
+) -> str:
+    subject = " ".join(
+        subject.replace("!", "").split()
+    ).strip()
+
+    if not subject:
+        return f"A quick look at {business_name}"
+
+    if len(subject.split()) > 8:
+        subject = " ".join(
+            subject.split()[:8]
+        ).rstrip(" ,.-")
+
+    return subject
+
+
+async def draft_dogfood_pitch(
+    business_name: str,
+    research_profile: str,
+    contact_name: str = "",
+    contact_title: str = "",
+) -> tuple[str, str]:
+    prompt = (
+        f"Business name: {business_name}\n"
+        f"Contact name: {contact_name or 'Unknown'}\n"
+        f"Contact title: {contact_title or 'Unknown'}\n\n"
+        f"Public research:\n{research_profile}"
+    )
+
+    response = await dogfood_agent.invoke_async(prompt)
+
+    response_text = str(response).strip()
+
+    subject = f"A simpler way to find clients for {business_name}"
+    hook = (
+        f"I came across {business_name} and noticed you work in the "
+        "automation space, so I thought Scout might be relevant to how "
+        "you find and pitch new clients."
+    )
+
+    if "SUBJECT:" in response_text and "HOOK:" in response_text:
+        try:
+            subject_part, hook_part = response_text.split(
+                "HOOK:",
+                1,
+            )
+
+            subject_part = subject_part.replace(
+                "SUBJECT:",
+                "",
+            ).strip()
+
+            hook_part = hook_part.strip()
+
+            if subject_part:
+                subject = subject_part
+
+            if hook_part:
+                hook = hook_part
+        except Exception:
+            pass
+
+    subject = _safe_subject(
+        subject,
+        business_name,
+    )
+
+    fixed_body = (
+        f"Hi {contact_name.strip() if contact_name.strip() else 'there'},\n\n"
+        f"{hook.strip()}\n\n"
+        f"{DOGFOOD_FIXED_PITCH}\n\n"
+        f"{DOGFOOD_CTA}"
+    )
+
+    if SCOUT_DEMO_VIDEO_URL:
+        fixed_body += (
+            "\n\n"
+            "I also put together a 3-minute walkthrough of Scout below."
+            f"\n{SCOUT_DEMO_VIDEO_URL}"
+        )
+
+    return subject, fixed_body
 
 
 # ---------------------------------------------------------------------------
@@ -219,11 +407,15 @@ class ResearchRequest(BaseModel):
     location: str
     scale: str = "small"
     count: int = 1
+    campaign_type: Literal["normal", "dogfood"] = "normal"
 
 
 class RegenerateRequest(BaseModel):
     business_name: str
     research_profile: str
+    campaign_type: Literal["normal", "dogfood"] = "normal"
+    contact_name: Optional[str] = None
+    contact_title: Optional[str] = None
 
 
 class SaveMailboxSettingsRequest(BaseModel):
@@ -235,20 +427,59 @@ class SendOutreachRequest(BaseModel):
     niche: str
     location: str
     scale: str
+    campaign_type: Literal["normal", "dogfood"] = "normal"
     recipient_email: str
     subject: str
     body: str
     business_name: str
-    form_screenshot: str
-    airtable_screenshot: str
-    email_screenshot: str
+    form_screenshot: Optional[str] = None
+    airtable_screenshot: Optional[str] = None
+    email_screenshot: Optional[str] = None
     slack_screenshot: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# DOGFOOD ASSETS
+# ---------------------------------------------------------------------------
+def validate_dogfood_assets() -> None:
+    missing = missing_dogfood_assets()
+
+    if missing:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Dogfood assets are missing. Add these files under "
+                "campaign_assets/dogfood/: "
+                + ", ".join(missing)
+            ),
+        )
+
+
+def get_dogfood_result() -> dict:
+    validate_dogfood_assets()
+    return dogfood_demo_result()
+
+
+# ---------------------------------------------------------------------------
+# ROOT / ACCESS
+# ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
     return {
-        "message": "Scout API is running!"
+        "message": "Scout API is running!",
+    }
+
+
+@app.get("/api/founder-access")
+async def founder_access(
+    user_id: str = Depends(get_verified_user_id),
+):
+    return {
+        "status": "success",
+        "allowed": bool(
+            FOUNDER_USER_ID
+            and user_id == FOUNDER_USER_ID
+        ),
     }
 
 
@@ -261,16 +492,41 @@ async def start_agent_pipeline(
     user_id: str = Depends(get_verified_user_id),
 ):
     try:
+        if request.campaign_type == CAMPAIGN_DOGFOOD:
+            require_founder(user_id)
+            validate_dogfood_assets()
+
+        campaign_type = request.campaign_type
+
+        effective_niche = (
+            DOGFOOD_CAMPAIGN_NICHE
+            if campaign_type == CAMPAIGN_DOGFOOD
+            else request.niche.strip()
+        )
+
+        if not effective_niche:
+            raise HTTPException(
+                status_code=400,
+                detail="Enter a niche before running Scout.",
+            )
+
+        if not request.location.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Enter a location before running Scout.",
+            )
+
         print(
             f"\n--- API Request Received: "
             f"User='{user_id}', "
-            f"Niche='{request.niche}', "
+            f"Campaign='{campaign_type}', "
+            f"Niche='{effective_niche}', "
             f"Location='{request.location}', "
             f"Scale='{request.scale}', "
             f"Count={request.count} ---"
         )
 
-        excluded_businesses = []
+        excluded_businesses: List[str] = []
 
         if supabase:
             history_res = (
@@ -287,18 +543,8 @@ async def start_agent_pipeline(
                     for item in history_res.data
                 ]
 
-                print(
-                    f"Excluding previously contacted businesses "
-                    f"for {user_id}: {excluded_businesses}"
-                )
-
-        # ---------------------------------------------------------------
-        # Stage 1: business discovery
-        # ---------------------------------------------------------------
-        print("Finding targeted businesses...")
-
         businesses = await find_businesses(
-            request.niche,
+            effective_niche,
             request.location,
             request.scale,
             excluded_businesses,
@@ -314,16 +560,13 @@ async def start_agent_pipeline(
             )
 
         run_count = min(
-            request.count,
-            len(businesses)
+            max(request.count, 1),
+            len(businesses),
         )
 
-        batch_results = []
+        batch_results: List[dict] = []
         available_pool = list(businesses)
 
-        # ---------------------------------------------------------------
-        # Stage 2 + 3 + 4
-        # ---------------------------------------------------------------
         for i in range(run_count):
             if not available_pool:
                 break
@@ -338,13 +581,8 @@ async def start_agent_pipeline(
 
             print(
                 f"[{i + 1}/{run_count}] "
-                f"Target business selected (Random): "
+                f"Target business selected: "
                 f"{target_business}"
-            )
-
-            print(
-                f"Researching business profile for "
-                f"{target_business}..."
             )
 
             research_result = await research_business(
@@ -352,60 +590,46 @@ async def start_agent_pipeline(
                 request.location,
             )
 
-            # Preserve the existing plain-text research profile for all
-            # downstream code that already expects it.
             profile = research_result["research_profile"]
 
-            print(
-                f"Resolved recipient for {target_business}: "
-                f"{research_result.get('recipient_email') or 'Not found'}"
-            )
+            if campaign_type == CAMPAIGN_DOGFOOD:
+                demo_result = get_dogfood_result()
 
-            if research_result.get("contact_email"):
-                print(
-                    f"Hunter personal contact found: "
-                    f"{research_result.get('contact_name') or 'Unnamed'} "
-                    f"<{research_result.get('contact_email')}>"
+                subject, body = await draft_dogfood_pitch(
+                    target_business,
+                    profile,
+                    research_result.get(
+                        "contact_name"
+                    ) or "",
+                    research_result.get(
+                        "contact_title"
+                    ) or "",
                 )
-            elif research_result.get("website_email"):
+
                 print(
-                    f"Hunter did not find a suitable personal contact. "
-                    f"Using Linkup website email: "
-                    f"{research_result.get('website_email')}"
+                    f"Drafting Dogfood Scout pitch "
+                    f"for {target_business}..."
                 )
+
             else:
-                print(
-                    "No recipient email was found by Linkup or Hunter."
+                demo_result = await build_real_demo(
+                    target_business,
+                    profile,
                 )
 
-            print(
-                f"Building live demo & capturing screenshots "
-                f"for {target_business}..."
-            )
+                subject, body = await draft_outreach_pitch(
+                    target_business,
+                    profile,
+                )
 
-            demo_result = await build_real_demo(
-                target_business,
-                profile,
-            )
-
-            print(
-                f"Drafting high-converting outreach pitch "
-                f"for {target_business}..."
-            )
-
-            subject, body = await draft_outreach_pitch(
-                target_business,
-                profile,
-            )
+                body = normalise_normal_inline_copy(
+                    body
+                )
 
             batch_results.append({
                 "business_name": target_business,
-
-                # Existing field retained for compatibility with the
-                # dashboard, demo builder, and outreach generator.
+                "campaign_type": campaign_type,
                 "research_profile": profile,
-
-                # Structured business research.
                 "business_type": research_result.get(
                     "business_type"
                 ),
@@ -424,10 +648,6 @@ async def start_agent_pipeline(
                 "automation_opportunity": research_result.get(
                     "automation_opportunity"
                 ),
-
-                # Linkup website email and Hunter enrichment are kept
-                # separate so the UI can show exactly where the final
-                # recipient came from.
                 "website_email": research_result.get(
                     "website_email"
                 ),
@@ -455,38 +675,29 @@ async def start_agent_pipeline(
                 "contact_source": research_result.get(
                     "contact_source"
                 ),
-
-                # THIS is what the frontend should use for "Send to".
-                # Hunter personal email wins; Linkup website email is
-                # the direct fallback.
                 "recipient_email": research_result.get(
                     "recipient_email"
                 ),
-
                 "demo_result": demo_result,
                 "draft_subject": subject,
                 "draft_body": body,
             })
 
-        print(
-            "--- Pipeline Batch Finished Successfully! ---"
-        )
-
         return {
             "status": "success",
-            "data": batch_results
+            "data": batch_results,
         }
 
     except HTTPException:
         raise
 
-    except Exception as e:
+    except Exception as exc:
         print("ERROR IN PIPELINE:")
         traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=str(exc),
         )
 
 
@@ -516,7 +727,7 @@ async def save_mailbox_settings(
     if not supabase:
         raise HTTPException(
             status_code=500,
-            detail="Supabase isn't configured on the server."
+            detail="Supabase isn't configured on the server.",
         )
 
     supabase.table(
@@ -540,12 +751,12 @@ async def save_mailbox_settings(
 
 @app.get("/api/settings/mailbox")
 async def get_mailbox_settings(
-    user_id: str = Depends(get_verified_user_id)
+    user_id: str = Depends(get_verified_user_id),
 ):
     if not supabase:
         return {
             "status": "success",
-            "connected": False
+            "connected": False,
         }
 
     res = (
@@ -560,13 +771,13 @@ async def get_mailbox_settings(
     if not res.data:
         return {
             "status": "success",
-            "connected": False
+            "connected": False,
         }
 
     return {
         "status": "success",
         "connected": True,
-        "gmail_address": res.data[0]["gmail_address"]
+        "gmail_address": res.data[0]["gmail_address"],
     }
 
 
@@ -575,62 +786,186 @@ async def get_mailbox_settings(
 # ---------------------------------------------------------------------------
 @app.post("/api/regenerate-outreach")
 async def regenerate_outreach(
-    request: RegenerateRequest
+    request: RegenerateRequest,
+    authorization: Optional[str] = Header(None),
 ):
     try:
-        print(
-            f"Regenerating pitch for: "
-            f"{request.business_name}..."
-        )
+        if request.campaign_type == CAMPAIGN_DOGFOOD:
+            user_id = get_verified_user_id(authorization)
+            require_founder(user_id)
 
-        subject, body = await draft_outreach_pitch(
-            request.business_name,
-            request.research_profile,
-        )
+            validate_dogfood_assets()
+
+            subject, body = await draft_dogfood_pitch(
+                request.business_name,
+                request.research_profile,
+                request.contact_name or "",
+                request.contact_title or "",
+            )
+
+        else:
+            subject, body = await draft_outreach_pitch(
+                request.business_name,
+                request.research_profile,
+            )
+
+            body = normalise_normal_inline_copy(
+                body
+            )
 
         return {
             "status": "success",
             "draft_subject": subject,
-            "draft_body": body
+            "draft_body": body,
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
+
+    except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=str(exc),
         )
 
 
 # ---------------------------------------------------------------------------
 # SEND OUTREACH
 # ---------------------------------------------------------------------------
+def build_normal_inline_specs(
+    request: SendOutreachRequest,
+) -> List[Dict[str, Any]]:
+    specs = [
+        {
+            "path": request.form_screenshot,
+            "cid": "scout-normal-form",
+            "alt": "Tally contact form demo",
+            "caption": "1. Customer intake form",
+        },
+        {
+            "path": request.airtable_screenshot,
+            "cid": "scout-normal-airtable",
+            "alt": "Airtable CRM demo",
+            "caption": "2. Lead logged into the CRM",
+        },
+        {
+            "path": request.email_screenshot,
+            "cid": "scout-normal-email",
+            "alt": "Automatic email reply demo",
+            "caption": "3. Automatic customer reply",
+        },
+    ]
+
+    if request.slack_screenshot:
+        specs.append(
+            {
+                "path": request.slack_screenshot,
+                "cid": "scout-normal-slack",
+                "alt": "Slack lead notification demo",
+                "caption": "4. Team notification",
+            }
+        )
+
+    return specs
+
+
+def build_history_payload(
+    user_id: str,
+    request: SendOutreachRequest,
+    screenshot_urls: Dict[str, Optional[str]],
+) -> dict:
+    return {
+        "user_name": user_id,
+        "business_name": request.business_name,
+        "niche": (
+            DOGFOOD_CAMPAIGN_NICHE
+            if request.campaign_type == CAMPAIGN_DOGFOOD
+            else request.niche
+        ),
+        "location": request.location,
+        "scale": request.scale,
+        "campaign_type": request.campaign_type,
+        "recipient_email": request.recipient_email,
+        "subject": request.subject,
+        "body": request.body,
+        "form_screenshot": screenshot_urls.get(
+            "form_screenshot"
+        ),
+        "airtable_screenshot": screenshot_urls.get(
+            "airtable_screenshot"
+        ),
+        "email_screenshot": screenshot_urls.get(
+            "email_screenshot"
+        ),
+        "slack_screenshot": screenshot_urls.get(
+            "slack_screenshot"
+        ),
+    }
+
+
 @app.post("/api/send-outreach")
 async def send_outreach(
     request: SendOutreachRequest,
     user_id: str = Depends(get_verified_user_id),
 ):
     try:
+        if request.campaign_type == CAMPAIGN_DOGFOOD:
+            require_founder(user_id)
+            validate_dogfood_assets()
+
+            dogfood_paths = dogfood_asset_paths()
+
+            inline_specs = dogfood_inline_specs(
+                SCOUT_DEMO_VIDEO_URL
+            )
+
+            attachment_history_paths = {
+                "form_screenshot": dogfood_paths[
+                    "form_screenshot"
+                ],
+                "airtable_screenshot": dogfood_paths[
+                    "airtable_screenshot"
+                ],
+                "email_screenshot": dogfood_paths[
+                    "email_screenshot"
+                ],
+                "slack_screenshot": dogfood_paths[
+                    "slack_screenshot"
+                ],
+            }
+
+        else:
+            inline_specs = build_normal_inline_specs(
+                request
+            )
+
+            for spec in inline_specs:
+                if not spec["path"]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Normal outreach is missing one of its "
+                            "generated proof screenshots."
+                        ),
+                    )
+
+            attachment_history_paths = {
+                "form_screenshot": request.form_screenshot,
+                "airtable_screenshot": request.airtable_screenshot,
+                "email_screenshot": request.email_screenshot,
+                "slack_screenshot": request.slack_screenshot,
+            }
+
         sender_email, app_password = get_mailbox_credentials(
             user_id
         )
 
         print(
-            f"Sending outreach for "
+            f"Sending {request.campaign_type} outreach for "
             f"'{request.business_name}' to "
             f"'{request.recipient_email}' via "
             f"{sender_email}'s mailbox."
         )
-
-        attachments = [
-            request.form_screenshot,
-            request.airtable_screenshot,
-            request.email_screenshot,
-        ]
-
-        if request.slack_screenshot:
-            attachments.append(
-                request.slack_screenshot
-            )
 
         status = send_email_smtp(
             to_email=request.recipient_email,
@@ -638,61 +973,75 @@ async def send_outreach(
             body=request.body,
             sender_email=sender_email,
             app_password=app_password,
-            attachment_paths=attachments,
+            inline_images=inline_specs,
         )
 
         if supabase:
-            form_url = upload_screenshot_to_storage(
-                request.form_screenshot
+            uploaded = {
+                key: upload_screenshot_to_storage(path)
+                for key, path in attachment_history_paths.items()
+            }
+
+            history_payload = build_history_payload(
+                user_id,
+                request,
+                uploaded,
             )
 
-            airtable_url = upload_screenshot_to_storage(
-                request.airtable_screenshot
-            )
+            # New schema includes campaign_type. For a safe deployment,
+            # retry once without that new column if the migration hasn't
+            # been applied yet. The email has already been sent, so history
+            # failure should never turn a successful send into a false error.
+            try:
+                supabase.table(
+                    "outreach_history"
+                ).insert(
+                    history_payload
+                ).execute()
 
-            email_url = upload_screenshot_to_storage(
-                request.email_screenshot
-            )
-
-            slack_url = (
-                upload_screenshot_to_storage(
-                    request.slack_screenshot
+            except Exception as history_exc:
+                print(
+                    "WARNING: Could not save campaign_type to "
+                    "outreach_history. Retrying legacy history insert."
                 )
-                if request.slack_screenshot
-                else None
-            )
+                print(history_exc)
 
-            supabase.table(
-                "outreach_history"
-            ).insert(
-                {
-                    "user_name": user_id,
-                    "business_name": request.business_name,
-                    "niche": request.niche,
-                    "location": request.location,
-                    "scale": request.scale,
-                    "recipient_email": request.recipient_email,
-                    "subject": request.subject,
-                    "body": request.body,
-                    "form_screenshot": form_url,
-                    "airtable_screenshot": airtable_url,
-                    "email_screenshot": email_url,
-                    "slack_screenshot": slack_url,
-                }
-            ).execute()
+                legacy_payload = dict(
+                    history_payload
+                )
+                legacy_payload.pop(
+                    "campaign_type",
+                    None
+                )
+
+                try:
+                    supabase.table(
+                        "outreach_history"
+                    ).insert(
+                        legacy_payload
+                    ).execute()
+
+                except Exception:
+                    print(
+                        "WARNING: Legacy history insert also failed."
+                    )
+                    traceback.print_exc()
 
         return {
             "status": "success",
             "message": status,
         }
 
-    except Exception as e:
+    except HTTPException:
+        raise
+
+    except Exception as exc:
         print("ERROR SENDING OUTREACH:")
         traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=str(exc),
         )
 
 
@@ -701,37 +1050,36 @@ async def send_outreach(
 # ---------------------------------------------------------------------------
 @app.get("/api/history")
 async def get_history(
-    user_id: str = Depends(get_verified_user_id)
+    user_id: str = Depends(get_verified_user_id),
 ):
     try:
         if not supabase:
             return {
                 "status": "success",
-                "data": []
+                "data": [],
             }
 
-        query = (
+        response = (
             supabase
             .table("outreach_history")
             .select("*")
             .eq("user_name", user_id)
             .order("created_at", desc=True)
+            .execute()
         )
-
-        response = query.execute()
 
         return {
             "status": "success",
-            "data": response.data
+            "data": response.data,
         }
 
-    except Exception as e:
+    except Exception as exc:
         print("ERROR FETCHING HISTORY:")
         traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=str(exc),
         )
 
 
@@ -742,7 +1090,7 @@ if os.path.exists("static"):
     app.mount(
         "/assets",
         StaticFiles(directory="static/assets"),
-        name="assets"
+        name="assets",
     )
 
     @app.get("/{full_path:path}")
@@ -750,10 +1098,11 @@ if os.path.exists("static"):
         if (
             full_path.startswith("api/")
             or full_path.startswith("screenshots/")
+            or full_path.startswith("campaign-assets/")
         ):
             raise HTTPException(
                 status_code=404,
-                detail="Not found"
+                detail="Not found",
             )
 
         return FileResponse(
@@ -768,5 +1117,5 @@ if __name__ == "__main__":
         "server:app",
         host="0.0.0.0",
         port=8000,
-        reload=True
+        reload=True,
     )
