@@ -3,7 +3,7 @@ uvicorn
 pydantic
 supabase
 python-dotenv
-playwright
+playwright==1.42.0
 pyairtable
 requests
 boto3
