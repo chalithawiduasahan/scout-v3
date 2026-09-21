@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, History, Home, Image as ImageIcon, Loader2, Menu, X, ArrowLeft, Globe, MapPin, BarChart3, Clock, Zap, Target, Plus, Minus, ShieldCheck } from 'lucide-react';
+import { ChevronDown, History, Home, Image as ImageIcon, Loader2, Menu, X, ArrowLeft, Globe, MapPin, BarChart3, Clock, Zap, Target, Plus, Minus, Key, Mail, Eye, EyeOff } from 'lucide-react';
 
 const SCALE_OPTIONS = [
   { value: 'small', label: 'Small (<10 staff)' },
@@ -69,9 +69,6 @@ function CountSelect({ value, onChange }: { value: string; onChange: (v: string)
   };
 
   const increase = () => {
-    // Capped at 2 (was 5) to reduce Playwright/Chromium memory pressure per
-    // run on Render's limited RAM - each additional lead in a batch adds a
-    // full sequential research + demo-build + screenshot cycle.
     if (currentNum < 2) {
       onChange(String(currentNum + 1));
     }
@@ -112,6 +109,11 @@ export default function Dashboard({ userName }: { userName: string }) {
   const [scale, setScale] = useState('small');
   const [count, setCount] = useState('1');
 
+  // Mailbox Credentials State (Task 2)
+  const [gmailAddress, setGmailAddress] = useState(() => localStorage.getItem('scout_gmail_address') || '');
+  const [gmailAppPassword, setGmailAppPassword] = useState(() => localStorage.getItem('scout_gmail_app_password') || '');
+  const [showPassword, setShowPassword] = useState(false);
+
   // Request State
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
@@ -121,14 +123,7 @@ export default function Dashboard({ userName }: { userName: string }) {
   const [resultsQueue, setResultsQueue] = useState<any[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
 
-  // Outreach State for Current Item in Queue
-  // NOTE: `researchedContactEmail` is informational only - the business
-  // contact email discovered during research. It is shown to the user for
-  // transparency but is NOT the actual send target. The real safety
-  // enforcement (always redirecting sends to a verified test inbox) lives
-  // server-side in server.py and cannot be changed from here - this is by
-  // design, since a frontend-only restriction could be bypassed by anyone
-  // calling the API directly.
+  // Outreach State
   const [researchedContactEmail, setResearchedContactEmail] = useState('');
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
@@ -142,22 +137,19 @@ export default function Dashboard({ userName }: { userName: string }) {
   const [lightbox, setLightbox] = useState<{ url: string; cap: string } | null>(null);
 
   const API_BASE = "https://scout-backend-gq18.onrender.com";
-
-  // Fixed demo recipient shown (and locked) in the "Send to" box. This is
-  // cosmetic/UX only - the box cannot be edited, but the real enforcement
-  // that ALL sends land here regardless of what this UI shows lives
-  // server-side in server.py (SES_TEST_RECIPIENT). That's intentional:
-  // anyone can view this value in the public JS bundle or call the API
-  // directly, so the backend, not this constant, is what actually protects
-  // real businesses from receiving unsolicited demo emails.
   const DEMO_RECIPIENT_EMAIL = "cwidusahan@gmail.com";
 
-  // Screenshots come in two forms depending on where they're from:
-  // - Home tab (freshly generated, not sent yet): a local server path like
-  //   "screenshots/xyz.png" - needs the API_BASE prefix to load.
-  // - History tab (already sent): a full permanent Supabase Storage URL like
-  //   "https://xxxx.supabase.co/storage/v1/object/public/screenshots/xyz.png"
-  //   - already a complete URL, must NOT be prefixed with API_BASE.
+  // Persist Mailbox Settings locally
+  const handleGmailAddressChange = (val: string) => {
+    setGmailAddress(val);
+    localStorage.setItem('scout_gmail_address', val);
+  };
+
+  const handleGmailPasswordChange = (val: string) => {
+    setGmailAppPassword(val);
+    localStorage.setItem('scout_gmail_app_password', val);
+  };
+
   const getImageUrl = (path: string) => {
     if (!path) return '';
     if (path.startsWith('http://') || path.startsWith('https://')) {
@@ -194,8 +186,6 @@ export default function Dashboard({ userName }: { userName: string }) {
 
   const loadQueueItem = (item: any) => {
     if (!item) return;
-    // This is only used to show the user what contact info research found -
-    // it is never used to decide where the demo email actually goes.
     setResearchedContactEmail(extractEmail(item.research_profile));
     setSubject(item.draft_subject);
     setBody(finalizeSignature(item.draft_body, userName));
@@ -270,19 +260,22 @@ export default function Dashboard({ userName }: { userName: string }) {
   const sendOutreach = async () => {
     const currentItem = resultsQueue[currentIndex];
     if (!currentItem) return;
+
+    if (!gmailAddress || !gmailAppPassword) {
+      setSendNote({ msg: 'Please provide both your Gmail address and Gmail App Password above.', type: 'error' });
+      return;
+    }
+
     setSendLoading(true);
     setSendNote(null);
     try {
       const payload = {
         user_name: userName,
+        gmail_address: gmailAddress,
+        gmail_app_password: gmailAppPassword,
         niche,
         location,
         scale,
-        // This is sent for logging/reference only - the backend always
-        // redirects the actual send to its own verified test inbox
-        // (SES_TEST_RECIPIENT) regardless of this value. See server.py
-        // for the enforced logic. Sent as the fixed demo recipient shown
-        // in the locked "Send to" box above, to match what the user saw.
         recipient_email: DEMO_RECIPIENT_EMAIL,
         subject,
         body,
@@ -299,7 +292,7 @@ export default function Dashboard({ userName }: { userName: string }) {
       });
       const data = await res.json();
       if (res.ok) {
-        setSendNote({ msg: `Demo email sent to the verified test inbox. Logged to History!`, type: 'success' });
+        setSendNote({ msg: `Email sent via SMTP (${gmailAddress})! Logged to History.`, type: 'success' });
         fetchHistory();
 
         setTimeout(() => {
@@ -338,7 +331,7 @@ export default function Dashboard({ userName }: { userName: string }) {
         </div>
       )}
 
-      {/* Clean vertical sidebar for desktop */}
+      {/* Sidebar */}
       <aside className={`${sidebarOpen ? 'w-64' : 'w-20'} flex flex-col border-r border-white/5 bg-ink-900/40 transition-all duration-300 shrink-0`}>
         <div className="flex items-center justify-between p-6">
           {sidebarOpen && <span className="font-display text-xl font-bold">Scout<span className="text-scout-400">.</span></span>}
@@ -454,16 +447,60 @@ export default function Dashboard({ userName }: { userName: string }) {
                     </div>
                   </div>
 
+                  {/* Task 2: Native Mailbox Config Card */}
+                  <div className="glass rounded-2xl p-6 space-y-4 border border-scout-400/20">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-xs font-semibold uppercase tracking-wider text-scout-400 flex items-center gap-2">
+                        <Key className="h-4 w-4" /> Native Mailbox Settings (SMTP)
+                      </h2>
+                      <span className="text-[10px] uppercase font-mono bg-scout-400/10 text-scout-300 px-2 py-0.5 rounded">
+                        Task 2 Active
+                      </span>
+                    </div>
+
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="flex flex-col gap-2">
+                        <label className="text-xs font-medium text-ink-400">Gmail Address</label>
+                        <div className="relative">
+                          <input
+                            type="email"
+                            value={gmailAddress}
+                            onChange={(e) => handleGmailAddressChange(e.target.value)}
+                            placeholder="your.email@gmail.com"
+                            className="w-full rounded-xl border border-white/10 bg-white/5 pl-9 pr-4 py-2 text-sm text-white focus:border-scout-400 focus:outline-none"
+                          />
+                          <Mail className="absolute left-3 top-2.5 h-4 w-4 text-ink-400" />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col gap-2">
+                        <label className="text-xs font-medium text-ink-400">Gmail App Password</label>
+                        <div className="relative">
+                          <input
+                            type={showPassword ? 'text' : 'password'}
+                            value={gmailAppPassword}
+                            onChange={(e) => handleGmailPasswordChange(e.target.value)}
+                            placeholder="xxxx xxxx xxxx xxxx"
+                            className="w-full rounded-xl border border-white/10 bg-white/5 px-4 pr-10 py-2 text-sm font-mono text-white focus:border-scout-400 focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPassword(!showPassword)}
+                            className="absolute right-3 top-2.5 text-ink-400 hover:text-white"
+                          >
+                            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    <p className="text-xs text-ink-500">
+                      Generate an App Password via Google Account &gt; Security &gt; 2-Step Verification.
+                    </p>
+                  </div>
+
                   <div className="glass-strong rounded-2xl p-6">
                     <h2 className="mb-4 text-xs font-semibold uppercase tracking-wider text-ink-400">Outreach — review before sending</h2>
                     <div className="space-y-4">
-                      {/* Locked "Send to" box - always shows the fixed demo
-                          recipient and cannot be edited (no onChange, always
-                          disabled). This is UX-only: the actual enforcement
-                          that every send lands here regardless of this box
-                          lives server-side in server.py, so it can't be
-                          bypassed by editing this UI or calling the API
-                          directly. */}
                       <div className="flex flex-col gap-2">
                         <label className="text-xs font-medium text-ink-400">Send to</label>
                         <div className="relative">
@@ -473,7 +510,6 @@ export default function Dashboard({ userName }: { userName: string }) {
                             readOnly
                             className="w-full cursor-not-allowed rounded-xl border border-scout-400/30 bg-scout-400/5 px-4 py-2.5 pr-9 text-sm text-scout-200 focus:outline-none"
                           />
-                          <ShieldCheck className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-scout-400" />
                         </div>
                         <p className="text-xs text-ink-500">
                           Demo mode — locked to a verified test inbox so trying this out never emails a real business.
