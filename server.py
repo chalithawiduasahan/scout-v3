@@ -516,7 +516,7 @@ async def draft_dogfood_pitch(
     if SCOUT_DEMO_VIDEO_URL:
         fixed_body += (
             "\n\n"
-            "I also put together a 3-minute walkthrough of Scout below."
+            "I also put together a 3-minute video of Scout below."
             f"\n{SCOUT_DEMO_VIDEO_URL}"
         )
 

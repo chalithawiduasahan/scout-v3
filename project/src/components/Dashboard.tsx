@@ -396,8 +396,8 @@ export default function Dashboard() {
       return (
         stripped +
         '\n\nBest regards,\n' +
-        name +
-        '\nCEO & Founder, Scout'
+        'Chalitha Widusahan' +
+        '\nFounder & CEO, Scout'
       );
     }
 
