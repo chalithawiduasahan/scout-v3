@@ -193,6 +193,14 @@ def enforce_send_gap(user_id: str) -> None:
 def schedule_next_send_window(user_id: str) -> None:
     """Called right after a successful send. Picks a fresh random 3-7 min
     gap and stores when the *next* send is allowed for this user.
+
+    Uses a plain UPDATE, never an insert. By the time this runs,
+    get_mailbox_credentials() has already read this user's row, so it's
+    guaranteed to exist — there is nothing to insert. A blind upsert()
+    risks Postgres treating it as a fresh INSERT (if the conflict target
+    isn't matched for any reason) and tripping the NOT NULL constraints
+    on gmail_address / gmail_app_password, which is what caused sends to
+    fail after a successful SMTP send.
     """
     if not supabase:
         return
@@ -204,13 +212,9 @@ def schedule_next_send_window(user_id: str) -> None:
         )
     )
 
-    supabase.table(USER_SETTINGS_TABLE).upsert(
-        {
-            "user_name": user_id,
-            "next_send_allowed_at": next_allowed.isoformat(),
-        },
-        on_conflict="user_name",
-    ).execute()
+    supabase.table(USER_SETTINGS_TABLE).update(
+        {"next_send_allowed_at": next_allowed.isoformat()}
+    ).eq("user_name", user_id).execute()
 
 FOUNDER_USER_ID = os.getenv(
     "SCOUT_FOUNDER_USER_ID",
@@ -1101,7 +1105,17 @@ async def send_outreach(
             inline_images=inline_specs,
         )
 
-        schedule_next_send_window(user_id)
+        try:
+            schedule_next_send_window(user_id)
+        except Exception as schedule_exc:
+            # The email has already been sent successfully at this point.
+            # A failure here is just cooldown bookkeeping — never let it
+            # surface as a "send failed" error to the user.
+            print(
+                "WARNING: Could not update next_send_allowed_at "
+                f"for user {user_id}."
+            )
+            print(schedule_exc)
 
         if supabase:
             uploaded = {

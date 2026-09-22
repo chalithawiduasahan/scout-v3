@@ -390,7 +390,7 @@ async def draft_dogfood_pitch(
         f"{opening}\n\n"
         f"{DOGFOOD_FIXED_PITCH}\n\n"
         f"{DOGFOOD_CTA}\n\n"
-        "I also put together a 3-minute walkthrough of Scout below.\n"
+        "I also put together a 3-minute video of Scout below.\n"
         f"{os.getenv('SCOUT_DEMO_VIDEO_URL', DEFAULT_DEMO_VIDEO_URL)}\n\n"
         "Best regards,\n"
         "Chalitha Widusahan\n"
