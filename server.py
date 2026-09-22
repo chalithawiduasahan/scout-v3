@@ -4,6 +4,7 @@ import random
 import re
 import traceback
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import (
@@ -91,6 +92,125 @@ USER_SETTINGS_TABLE = "user_settings"
 
 CAMPAIGN_NORMAL = "normal"
 CAMPAIGN_DOGFOOD = "dogfood"
+
+# ---------------------------------------------------------------------------
+# EMAIL SEND RATE LIMITING
+# ---------------------------------------------------------------------------
+# Every send goes out through the user's own Gmail mailbox, so these limits
+# exist to keep that mailbox from getting flagged/suspended for spam-like
+# sending behaviour. Applied to every campaign type, including "dogfood",
+# since the founder's Gmail account needs the same protection.
+DAILY_EMAIL_LIMIT = 10
+MIN_EMAIL_GAP_SECONDS = 180  # 3 minutes
+MAX_EMAIL_GAP_SECONDS = 420  # 7 minutes
+
+
+def _utc_day_start() -> datetime:
+    """Start of the current UTC calendar day (the daily limit resets here)."""
+    now = datetime.now(timezone.utc)
+    return now.replace(
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+
+def enforce_daily_email_limit(user_id: str) -> None:
+    """Raises 429 if this user has already sent DAILY_EMAIL_LIMIT emails
+    today (UTC). Counts actual sends recorded in outreach_history, not how
+    many times Scout has been run — so skipped/unsent runs don't count
+    against the limit.
+    """
+    if not supabase:
+        return
+
+    res = (
+        supabase
+        .table("outreach_history")
+        .select("id", count="exact")
+        .eq("user_name", user_id)
+        .gte("created_at", _utc_day_start().isoformat())
+        .execute()
+    )
+
+    sent_today = res.count or 0
+
+    if sent_today >= DAILY_EMAIL_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Daily email limit reached ({DAILY_EMAIL_LIMIT}/"
+                f"{DAILY_EMAIL_LIMIT} sent today). Try again after "
+                "midnight UTC."
+            ),
+        )
+
+
+def enforce_send_gap(user_id: str) -> None:
+    """Raises 429 if it's too soon after this user's last send. The actual
+    minimum gap for each send is randomised (3-7 min) and stored by
+    schedule_next_send_window() right after a successful send.
+    """
+    if not supabase:
+        return
+
+    res = (
+        supabase
+        .table(USER_SETTINGS_TABLE)
+        .select("next_send_allowed_at")
+        .eq("user_name", user_id)
+        .limit(1)
+        .execute()
+    )
+
+    if not res.data or not res.data[0].get("next_send_allowed_at"):
+        return
+
+    next_allowed = datetime.fromisoformat(
+        res.data[0]["next_send_allowed_at"]
+    )
+    now = datetime.now(timezone.utc)
+
+    if now < next_allowed:
+        wait_seconds = int(
+            (next_allowed - now).total_seconds()
+        )
+        minutes, seconds = divmod(
+            max(wait_seconds, 1),
+            60,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Please wait {minutes}m {seconds}s before sending "
+                "your next email. Scout spaces sends out so your "
+                "mailbox doesn't look like it's spamming."
+            ),
+        )
+
+
+def schedule_next_send_window(user_id: str) -> None:
+    """Called right after a successful send. Picks a fresh random 3-7 min
+    gap and stores when the *next* send is allowed for this user.
+    """
+    if not supabase:
+        return
+
+    next_allowed = datetime.now(timezone.utc) + timedelta(
+        seconds=random.randint(
+            MIN_EMAIL_GAP_SECONDS,
+            MAX_EMAIL_GAP_SECONDS,
+        )
+    )
+
+    supabase.table(USER_SETTINGS_TABLE).upsert(
+        {
+            "user_name": user_id,
+            "next_send_allowed_at": next_allowed.isoformat(),
+        },
+        on_conflict="user_name",
+    ).execute()
 
 FOUNDER_USER_ID = os.getenv(
     "SCOUT_FOUNDER_USER_ID",
@@ -492,6 +612,8 @@ async def start_agent_pipeline(
     user_id: str = Depends(get_verified_user_id),
 ):
     try:
+        enforce_daily_email_limit(user_id)
+
         if request.campaign_type == CAMPAIGN_DOGFOOD:
             require_founder(user_id)
             validate_dogfood_assets()
@@ -909,6 +1031,9 @@ async def send_outreach(
     user_id: str = Depends(get_verified_user_id),
 ):
     try:
+        enforce_daily_email_limit(user_id)
+        enforce_send_gap(user_id)
+
         if request.campaign_type == CAMPAIGN_DOGFOOD:
             require_founder(user_id)
             validate_dogfood_assets()
@@ -975,6 +1100,8 @@ async def send_outreach(
             app_password=app_password,
             inline_images=inline_specs,
         )
+
+        schedule_next_send_window(user_id)
 
         if supabase:
             uploaded = {
