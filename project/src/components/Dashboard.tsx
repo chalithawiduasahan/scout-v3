@@ -170,12 +170,12 @@ function CountSelect({
               String(
                 Math.min(
                   current + 1,
-                  2
+                  5
                 )
               )
             )
           }
-          disabled={current >= 2}
+          disabled={current >= 5}
           className="rounded-lg p-1 text-ink-400 hover:bg-white/10 hover:text-white disabled:opacity-30"
         >
           <Plus className="h-4 w-4" />
