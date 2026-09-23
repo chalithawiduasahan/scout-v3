@@ -147,6 +147,30 @@ def enforce_daily_email_limit(user_id: str) -> None:
         )
 
 
+def _parse_supabase_timestamp(value: str) -> datetime:
+    """Parse a timestamptz string coming back from Supabase/Postgres.
+
+    Postgres trims trailing zeros off fractional seconds (e.g. it may
+    return ".31692" instead of ".316920"), but Python's
+    datetime.fromisoformat() on versions before 3.11 only accepts
+    exactly 0, 3, or 6 fractional digits and raises ValueError on
+    anything else. Normalize the fractional part to 6 digits first so
+    parsing never breaks on Postgres's actual output.
+    """
+    value = value.strip()
+
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+
+    def _pad_fraction(match: "re.Match[str]") -> str:
+        digits = match.group(1)[:6].ljust(6, "0")
+        return f".{digits}"
+
+    value = re.sub(r"\.(\d+)", _pad_fraction, value, count=1)
+
+    return datetime.fromisoformat(value)
+
+
 def enforce_send_gap(user_id: str) -> None:
     """Raises 429 if it's too soon after this user's last send. The actual
     minimum gap for each send is randomised (3-7 min) and stored by
@@ -167,7 +191,7 @@ def enforce_send_gap(user_id: str) -> None:
     if not res.data or not res.data[0].get("next_send_allowed_at"):
         return
 
-    next_allowed = datetime.fromisoformat(
+    next_allowed = _parse_supabase_timestamp(
         res.data[0]["next_send_allowed_at"]
     )
     now = datetime.now(timezone.utc)
